@@ -1,5 +1,7 @@
 # Build the Blender plugin against the local Logi Plugin Service PluginApi.dll
-# and pack Blender-windows-1.1.lplug4. Does not install the plugin.
+# and pack Blender-windows-1.1.1.lplug4.
+# BlenderPluginDevLink=false keeps this from writing a live .link file or
+# reloading Logi Plugin Service. A normal dotnet build still does both.
 param(
     [string]$PluginApiDir = "",
     [switch]$Install
@@ -41,7 +43,8 @@ if (-not $dotnet) {
 
 $env:LOGI_PLUGIN_API_DIR = $PluginApiDir
 Write-Output "Using PluginApi.dll from $PluginApiDir"
-dotnet build (Join-Path $root "BlenderPlugin\src\BlenderPlugin.csproj") -c Release
+Write-Output "Build-only: BlenderPluginDevLink=false, no plugin .link and no service reload."
+dotnet build (Join-Path $root "BlenderPlugin\src\BlenderPlugin.csproj") -c Release -p:BlenderPluginDevLink=false
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $built = Join-Path $root "BlenderPlugin\bin\Release\bin\BlenderPlugin.dll"
@@ -64,6 +67,6 @@ if (-not $python) {
 
 & $python.Source (Join-Path $root "tools\package_plugin.py") `
     --dll $built `
-    --lplug4 (Join-Path $root "dist\Blender-windows-1.1.lplug4") `
-    --addon-zip (Join-Path $root "dist\blender_mx_bridge-1.1.0.zip")
+    --lplug4 (Join-Path $root "dist\Blender-windows-1.1.1.lplug4") `
+    --addon-zip (Join-Path $root "dist\blender_mx_bridge-1.1.1.zip")
 exit $LASTEXITCODE

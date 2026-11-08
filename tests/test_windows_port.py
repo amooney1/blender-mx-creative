@@ -4,6 +4,7 @@
 
 import hashlib
 import json
+import os
 import pathlib
 import re
 import sys
@@ -48,7 +49,7 @@ def load_bridge():
         pass
 
     bpy.types = types.SimpleNamespace(AddonPreferences=_Type, Operator=_Type)
-    bpy.props = types.SimpleNamespace(IntProperty=_Prop)
+    bpy.props = types.SimpleNamespace(IntProperty=_Prop, StringProperty=_Prop)
     bpy.utils = types.SimpleNamespace(
         register_class=lambda *args, **kwargs: None,
         unregister_class=lambda *args, **kwargs: None,
@@ -88,7 +89,7 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("https://github.com/amooney1/blender-mx-creative", self.text)
         self.assertIn("xfanta/blender-mx-creative", self.text)
         self.assertNotIn("license: MIT", self.text)
-        self.assertIn("version: 1.1", self.text)
+        self.assertIn("version: 1.1.1", self.text)
 
 
 class ProfileTests(unittest.TestCase):
@@ -182,6 +183,39 @@ class BridgePolicyTests(unittest.TestCase):
             BRIDGE._validate_select_types(["OBJECT"])
         self.assertEqual(BRIDGE._validate_select_types(["VERT", "EDGE"]), ["VERT", "EDGE"])
 
+    def test_failures_are_codes_without_paths_or_tracebacks(self):
+        leaked = r"C:\Users\Alex\Documents\secret.blend"
+        unknown = BRIDGE._handle({"cmd": leaked})
+        failed = BRIDGE._failure_response(RuntimeError(leaked))
+        rejected = BRIDGE._failure_response(ValueError("operator is not allowed: " + leaked))
+        oversized = BRIDGE._client_error("request_too_large")
+        for response in (unknown, failed, rejected, oversized):
+            blob = json.dumps(response)
+            self.assertNotIn("trace", response)
+            self.assertNotIn("Users", blob)
+            self.assertNotIn("secret.blend", blob)
+            self.assertNotIn(leaked, blob)
+            self.assertIn(response["error"], BRIDGE._CLIENT_ERRORS)
+            self.assertEqual(response["message"], BRIDGE._CLIENT_ERRORS[response["error"]])
+            self.assertFalse(response["ok"])
+        self.assertEqual(unknown["error"], "unknown_command")
+        self.assertEqual(failed["error"], "failed")
+        self.assertEqual(rejected["error"], "rejected")
+        source = (ROOT / "blender-addon/blender_mx_bridge/__init__.py").read_text()
+        self.assertNotIn("format_exc", source)
+        self.assertNotIn('"trace"', source)
+
+    def test_pairing_stays_off_until_a_token_is_configured(self):
+        self.assertTrue(BRIDGE._check_auth({"cmd": "state"}, ""))
+        self.assertTrue(BRIDGE._check_auth({"cmd": "state", "auth": "ignored"}, ""))
+        self.assertFalse(BRIDGE._check_auth({"cmd": "state"}, "local-secret"))
+        self.assertFalse(BRIDGE._check_auth({"cmd": "state", "auth": "wrong"}, "local-secret"))
+        self.assertTrue(BRIDGE._check_auth({"cmd": "state", "auth": "local-secret"}, "local-secret"))
+        self.assertFalse(BRIDGE._check_auth({"cmd": "state"}, None))
+        self.assertEqual(BRIDGE._configured_token(), "")
+        denied = BRIDGE._client_error("unauthorized")
+        self.assertNotIn("local-secret", json.dumps(denied))
+
     def test_line_cap_rejects_oversized_frames(self):
         kind, _, _ = BRIDGE._consume_line(b'{"cmd":"ping"}\n')
         self.assertEqual(kind, "line")
@@ -229,7 +263,7 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256(mac71).hexdigest(), MAC_PROFILES["DefaultProfile71.lp5"])
             with zipfile.ZipFile(addon) as archive:
                 manifest = archive.read("blender_manifest.toml").decode()
-            self.assertIn('version = "1.1.0"', manifest)
+            self.assertIn('version = "1.1.1"', manifest)
             self.assertIn("127.0.0.1", manifest)
 
     def test_project_keeps_the_mac_pluginapi_path(self):
@@ -238,6 +272,39 @@ class PackageTests(unittest.TestCase):
         self.assertIn("LOGI_PLUGIN_API_DIR", text)
         self.assertIn("<Private>false</Private>", text)
         self.assertIn("~/Library/Application\\ Support/Logi/LogiPluginService/Plugins/", text)
+        post_build = text.split('<Target Name="PostBuild"', 1)[1].split("</Target>", 1)[0]
+        self.assertIn("BlenderPluginDevLink)' == 'true'", post_build)
+        self.assertIn("loupedeck:plugin/$(PluginShortName)/reload", post_build)
+        package_only = text.split('<Target Name="PostBuildPackageOnly"', 1)[1].split("</Target>", 1)[0]
+        self.assertIn("BlenderPluginDevLink)' != 'true'", package_only)
+        self.assertNotIn("<Exec", package_only)
+        self.assertNotIn("<Delete", package_only)
+        script = (ROOT / "tools/windows_build.ps1").read_text()
+        self.assertIn("-p:BlenderPluginDevLink=false", script)
+        self.assertNotIn("$env:LOGI_PLUGIN_DIR", script)
+
+    def test_devlink_property_defaults_on_and_package_build_turns_it_off(self):
+        import shutil
+        import subprocess
+
+        dotnet = shutil.which("dotnet")
+        if dotnet is None:
+            self.skipTest("dotnet is not on PATH")
+        project = ROOT / "BlenderPlugin/src/BlenderPlugin.csproj"
+        env = dict(os.environ)
+        default = subprocess.run(
+            [dotnet, "msbuild", str(project), "-getProperty:BlenderPluginDevLink", "-nologo"],
+            check=False, capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(default.returncode, 0, default.stdout + default.stderr)
+        self.assertEqual(default.stdout.strip(), "true")
+        packaged = subprocess.run(
+            [dotnet, "msbuild", str(project), "-getProperty:BlenderPluginDevLink",
+             "-p:BlenderPluginDevLink=false", "-nologo"],
+            check=False, capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(packaged.returncode, 0, packaged.stdout + packaged.stderr)
+        self.assertEqual(packaged.stdout.strip(), "false")
 
 
 if __name__ == "__main__":

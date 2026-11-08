@@ -67,6 +67,16 @@ try
     Check(!thrown, "an unreadable foundation directory escaped the probe");
     Check(!BlenderInstallProbe.IsWindowsInstallPresent() || OperatingSystem.IsWindows(),
         "non-Windows probe claimed a Windows install");
+
+    Check(BridgeToken.Normalize("  local-secret  ") == "local-secret", "token trim");
+    Check(BridgeToken.Normalize("") == "", "empty token");
+    Check(BridgeToken.Normalize(null) == "", "null token");
+    Check(BridgeToken.Normalize("one\ntwo") == "", "multiline token is not sent");
+    Check(BridgeToken.Normalize(new string('a', BridgeToken.MaxLength + 1)) == "", "overlong token is not sent");
+    var tokenPath = BridgeToken.TokenFilePath("appdata");
+    Check(tokenPath.EndsWith(Path.Combine("PluginData", "Blender", "bridge.token"), StringComparison.Ordinal),
+        "token file stays under PluginData");
+    Check(tokenPath.IndexOf("Users", StringComparison.OrdinalIgnoreCase) < 0, "token helper did not invent a profile path");
 }
 finally
 {

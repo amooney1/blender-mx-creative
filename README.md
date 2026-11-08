@@ -189,10 +189,12 @@ For a tight loop: `cd BlenderPlugin/src && dotnet watch build`.
 On Windows the same project looks for `PluginApi.dll` under
 `C:\Program Files\Logi\LogiPluginService\` and
 `C:\Program Files\Logitech\LogiPluginService\`, or in `LOGI_PLUGIN_API_DIR`.
-It does not copy that DLL into the package. `tools/windows_build.ps1` builds
-and packs only; it does not install. The assembly target stays `net10.0`,
-which is what Logi Plugin Service 6.4 loaded on the Mac this was built for.
-A rebuild has not been run on Windows in this change.
+It does not copy that DLL into the package. `dotnet build` still writes a
+`.link` and reloads Logi Plugin Service. `tools/windows_build.ps1` passes
+`-p:BlenderPluginDevLink=false`, so that package build does neither. The
+assembly target stays `net10.0`. A 1.1.0 Windows build loaded in Logi Plugin
+Service; the Actions Ring hardware check is still open. See
+[docs/windows-11.md](docs/windows-11.md).
 
 Reload with `open "loupedeck://plugin/Blender/reload"` rather than killing Logi
 Plugin Service. The service drops a marker in `Logs/plugin_crashes/` before loading

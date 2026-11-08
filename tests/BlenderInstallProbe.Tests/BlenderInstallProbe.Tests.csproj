@@ -7,5 +7,6 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="..\..\BlenderPlugin\src\Helpers\BlenderInstallProbe.cs" Link="BlenderInstallProbe.cs" />
+    <Compile Include="..\..\BlenderPlugin\src\Helpers\BridgeToken.cs" Link="BridgeToken.cs" />
   </ItemGroup>
 </Project>

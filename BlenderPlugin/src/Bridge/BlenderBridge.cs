@@ -109,6 +109,14 @@ namespace Loupedeck.BlenderPlugin
                 request["args"] = arguments;
             }
 
+            // Absent or empty token file: omit auth, which is what the tested
+            // installs send. The add-on ignores the field until its preference is set.
+            var token = BridgeToken.Current();
+            if (!String.IsNullOrEmpty(token))
+            {
+                request["auth"] = token;
+            }
+
             if (!this.Exchange(request, out var response))
             {
                 return BridgeResult.Unreachable;

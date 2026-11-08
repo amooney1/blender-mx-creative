@@ -1,8 +1,13 @@
 # Windows 11 — Actions Ring package
 
 This is a packaging and application-detection change for the existing Blender
-plugin. It is not a new plugin and it has not been loaded in Logi Options+ or
-on an MX Master 4. Linux checks in this repository do not stand in for that.
+plugin. A Windows build of 1.1.0 against the installed PluginApi.dll, using
+.NET SDK 10.0.403, loaded in Logi Plugin Service and connected to Blender
+5.2.3. Loopback ping, state, and a Vertex request were exercised. That Vertex
+request did not include an execution context, so it is not evidence that
+`mesh.select_all` ran. Unknown command, unknown operator, and an oversized
+line were refused. The Actions Ring itself has not been checked. Linux tests
+do not stand in for that.
 
 The plugin is already a Logi Actions SDK `plugin4` package. Its buttons are
 `PluginDynamicCommand` actions and its dials are `PluginDynamicAdjustment`
@@ -36,10 +41,14 @@ while the ring overlay has focus.
   the previous files. Undo and Redo are still keystrokes, because Blender
   refuses `ed.undo` / `ed.redo` from the add-on. The other ring slots use the
   bridge first.
-* The add-on still listens on `127.0.0.1:47800`. It now refuses operators that
-  the plugin does not send, and it refuses a request line over 8192 bytes.
-  There is no shell, no new port, and no pairing secret. A pairing secret
-  would have broken the existing Mac plugin.
+* The add-on still listens on `127.0.0.1:47800`. It refuses operators that the
+  plugin does not send, and it refuses a request line over 8192 bytes. Failed
+  replies are a fixed error code and a fixed phrase. They do not include a
+  Python traceback or the exception text.
+* Pairing is implemented and left off. An empty add-on token and a missing
+  plugin token file keep the Mac install and the tested Windows install on
+  the same protocol. Turning the token on is a migration and needs approval
+  before anyone sets it on a live machine. See below.
 
 Marketplace approval guidelines exclude GPL-2.0 and GPL-3.0. This package
 stays GPL-3.0-or-later and is not claimed to be Marketplace-eligible.
@@ -48,8 +57,8 @@ stays GPL-3.0-or-later and is not claimed to be Marketplace-eligible.
 
 From `dist/` after the pack step, or from the artifact bundle:
 
-* `Blender-windows-1.1.lplug4`
-* `blender_mx_bridge-1.1.0.zip`
+* `Blender-windows-1.1.1.lplug4` after `tools\windows_build.ps1` on the PC
+* `blender_mx_bridge-1.1.1.zip`
 
 Do not copy `PluginApi.dll` from another machine. Do not copy Options+
 `settings.db`, logs, or profile backups off the PC.
@@ -83,32 +92,39 @@ needed for the rebuild below. Upstream required Logi Plugin Service 6.4
 because that host was .NET 10, and this assembly targets `net10.0`. Record the
 host version you actually have. An older host may refuse the DLL.
 
-## Optional rebuild, so Windows install detection is in the DLL
+## Rebuild
 
-Skip this if `PluginApi.dll` or the .NET 10 SDK is missing. The prebuilt
-package still contains the upstream assembly, which already exposes the
-actions. It reports Blender as installed only when `/Applications/Blender.app`
-exists, so on Windows the application can stay "unknown" until you rebuild.
+1.1.0 is the build Logi Plugin Service already loaded. 1.1.1 is the source
+fix for the live `.link` write and the traceback replies. Rebuild it on the
+PC. Do not set `LOGI_PLUGIN_DIR`. The script passes
+`-p:BlenderPluginDevLink=false`, so this build does not write
+`BlenderPlugin.link` and does not reload Logi Plugin Service.
+
+A plain `dotnet build` without that property still writes the link and
+reloads. That is the developer loop, and it is what 1.1.0 did until
+`LOGI_PLUGIN_DIR` was pointed at a scratch directory.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\windows_build.ps1
 ```
 
-If the DLL is not in a default directory:
+If `PluginApi.dll` is not in a default directory:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\windows_build.ps1 -PluginApiDir "D:\path\to\the\directory"
 ```
 
-The script refuses `-Install`. It writes `dist\Blender-windows-1.1.lplug4`
-from the new build. `tools\windows_build.ps1` does not copy `PluginApi.dll`
-into that package.
+The script refuses `-Install`. It writes `dist\Blender-windows-1.1.1.lplug4`
+and `dist\blender_mx_bridge-1.1.1.zip`. It does not copy `PluginApi.dll` into
+the package. After it finishes, confirm no new `BlenderPlugin.link` appeared
+under `%LOCALAPPDATA%\Logi\LogiPluginService\Plugins`. Install the new package
+only when you mean to, using the unpack steps below.
 
 ## Install the add-on
 
 1. Use a disposable `.blend`. Do not point this at a real production file.
 2. Blender → Edit → Preferences → Add-ons → the menu → **Install from Disk…**
-   → `blender_mx_bridge-1.1.0.zip`.
+   → `blender_mx_bridge-1.1.1.zip`. Leave the Bridge token blank.
 3. Enable **MX Console Bridge** if it did not enable itself.
 4. **Save Preferences**.
 5. In the Blender system console, or Window → Toggle System Console, look for
@@ -117,6 +133,27 @@ into that package.
    the files does not unload the old module.
 
 The add-on does not need an internet connection. It binds `127.0.0.1` only.
+
+## Pairing
+
+Leave this off for the machine that already passed the loopback checks, and
+for the existing Mac install. The add-on token ships empty. The plugin sends
+an `auth` field only when this file exists and contains one line of at most
+256 characters:
+
+```text
+%LOCALAPPDATA%\Logi\LogiPluginService\PluginData\Blender\bridge.token
+```
+
+On macOS the same relative path is under `~/Library/Application Support/`.
+Do not create that file, and do not type a token into the add-on, until a
+rebuild that contains this source is installed on both sides and that
+migration has been approved. If only the add-on token is set, every command
+is refused with `unauthorized` and the tested plugin stops driving Blender.
+
+With both sides empty, requests stay as they are now: loopback, the operator
+allowlist, and no authenticator. That is the compatible limitation. A local
+process can still connect while the token is empty. The allowlist is unchanged.
 
 ## Install the plugin
 
@@ -128,7 +165,7 @@ plugin service afterwards.
 $plugins = Join-Path $env:LOCALAPPDATA "Logi\LogiPluginService\Plugins\Blender"
 if (Test-Path $plugins) { Remove-Item -LiteralPath $plugins -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $plugins | Out-Null
-Expand-Archive -LiteralPath .\dist\Blender-windows-1.1.lplug4 -DestinationPath $plugins -Force
+Expand-Archive -LiteralPath .\dist\Blender-windows-1.1.1.lplug4 -DestinationPath $plugins -Force
 ```
 
 `.lplug4` is a zip with a different extension. If `Expand-Archive` refuses it,

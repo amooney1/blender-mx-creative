@@ -28,11 +28,11 @@
 # Everything that touches bpy runs on Blender's main thread via a timer; the
 # socket threads only queue work and wait for the result.
 
+import hmac
 import json
 import queue
 import socket
 import threading
-import traceback
 
 import bpy
 
@@ -73,6 +73,79 @@ _FLATTEN_VECTORS = (
 )
 
 _SELECT_TYPES = frozenset({"VERT", "EDGE", "FACE"})
+
+# Wire errors are codes plus a fixed phrase. Exception text and tracebacks
+# stay off the socket: they can contain the user's paths.
+_CLIENT_ERRORS = {
+    "bad_request": "bad request",
+    "request_too_large": "request too large",
+    "unknown_command": "unknown command",
+    "rejected": "command rejected",
+    "failed": "command failed",
+    "timeout": "timed out",
+    "no_response": "no response",
+    "unauthorized": "unauthorized",
+}
+
+
+def _client_error(code):
+    if code not in _CLIENT_ERRORS:
+        code = "failed"
+    return {"ok": False, "error": code, "message": _CLIENT_ERRORS[code]}
+
+
+def _failure_response(exc):
+    """Map a main-thread exception to a client-safe refusal.
+
+    ValueError is the allowlist and argument check. Everything else, including
+    Blender's own errors, is a generic failure. The exception text is not copied.
+    """
+    code = "rejected" if isinstance(exc, ValueError) else "failed"
+    print("[MX Bridge] %s (%s)" % (code, type(exc).__name__))
+    return _client_error(code)
+
+
+def _configured_token():
+    """Return the pairing token, or "" when pairing is off.
+
+    An over-long value fails closed (None) so a bad preference does not turn
+    pairing off. The shipped default is empty, which accepts the existing plugin.
+    """
+    preferences = getattr(bpy.context, "preferences", None)
+    addons = getattr(preferences, "addons", None)
+    if addons is None:
+        return ""
+    prefs = addons.get(__package__)
+    if not prefs:
+        return ""
+    token = getattr(prefs.preferences, "token", "") or ""
+    if not isinstance(token, str):
+        return None
+    token = token.strip()
+    if token == "":
+        return ""
+    if len(token) > 256 or "\n" in token or "\r" in token or "\x00" in token:
+        return None
+    return token
+
+
+def _check_auth(request, expected):
+    """True when pairing is off, or the request carries the same token.
+
+    expected "" keeps the current Mac and Windows installs working. expected
+    None means the preference is unusable and the request is refused.
+    """
+    if expected is None:
+        return False
+    if expected == "":
+        return True
+    presented = request.get("auth") if isinstance(request, dict) else None
+    if not isinstance(presented, str) or len(presented) > 256:
+        return False
+    try:
+        return hmac.compare_digest(presented.encode("utf-8"), expected.encode("utf-8"))
+    except (TypeError, UnicodeError):
+        return False
 
 # Main-thread work queue. Items are (request_dict, result_holder, done_event).
 _work = queue.Queue()
@@ -416,10 +489,14 @@ def _tag_redraw():
 
 
 def _handle(request):
+    if not isinstance(request, dict):
+        return _client_error("bad_request")
+    if not _check_auth(request, _configured_token()):
+        return _client_error("unauthorized")
     cmd = request.get("cmd")
     handler = _HANDLERS.get(cmd)
     if handler is None:
-        return {"ok": False, "error": "unknown command: %s" % cmd}
+        return _client_error("unknown_command")
     payload = handler(request.get("args") or {}) or {}
     _tag_redraw()
     response = {"ok": True}
@@ -440,12 +517,8 @@ def _pump():
             break
         try:
             holder["response"] = _handle(request)
-        except Exception as exc:  # noqa: BLE001 - report anything back to the console
-            holder["response"] = {
-                "ok": False,
-                "error": "%s: %s" % (type(exc).__name__, exc),
-                "trace": traceback.format_exc(),
-            }
+        except Exception as exc:  # noqa: BLE001 - the client gets a code, not the text
+            holder["response"] = _failure_response(exc)
         finally:
             done.set()
     return 0.02
@@ -457,8 +530,8 @@ def _dispatch(request, timeout=5.0):
     done = threading.Event()
     _work.put((request, holder, done))
     if not done.wait(timeout):
-        return {"ok": False, "error": "timed out waiting for Blender's main thread"}
-    return holder.get("response", {"ok": False, "error": "no response"})
+        return _client_error("timeout")
+    return holder.get("response", _client_error("no_response"))
 
 
 # ---------------------------------------------------------------------------
@@ -523,7 +596,8 @@ class _BridgeServer:
                         break
                     if kind == "overflow":
                         try:
-                            conn.sendall(b'{"ok": false, "error": "request too large"}\n')
+                            payload = json.dumps(_client_error("request_too_large")) + "\n"
+                            conn.sendall(payload.encode("utf-8"))
                         except OSError:
                             return
                         return
@@ -532,11 +606,11 @@ class _BridgeServer:
                         continue
                     try:
                         request = json.loads(line.decode("utf-8"))
-                    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                        response = {"ok": False, "error": "bad request: %s" % exc}
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        response = _client_error("bad_request")
                     else:
                         if not isinstance(request, dict):
-                            response = {"ok": False, "error": "bad request"}
+                            response = _client_error("bad_request")
                         else:
                             response = _dispatch(request)
                             response["id"] = request.get("id")
@@ -561,9 +635,27 @@ class MXBridgePreferences(bpy.types.AddonPreferences):
         max=65535,
     )
 
+    token: bpy.props.StringProperty(
+        name="Bridge token",
+        description=(
+            "Leave empty to accept the existing local plugin. Set this only "
+            "after the plugin token file uses the same value. That migration "
+            "is off until it is explicitly approved"
+        ),
+        default="",
+        maxlen=256,
+        subtype='PASSWORD',
+    )
+
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "port")
+        layout.prop(self, "token")
+        token = (self.token or "").strip()
+        if token:
+            layout.label(text="Token on. Requests without it are refused.")
+        else:
+            layout.label(text="Token off. The existing local plugin is accepted.")
         running = _server is not None
         layout.label(
             text="Listening on %s:%d" % (HOST, self.port) if running else "Not running",
