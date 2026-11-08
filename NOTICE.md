@@ -43,4 +43,5 @@ The Windows packaging in this repository is a derivative of Michal Fanta's
 under the same GPL-3.0-or-later terms. The icon attribution above is unchanged.
 Logitech's Marketplace approval guidelines exclude GPL-2.0 and GPL-3.0, so this
 package is not Marketplace-eligible and it does not ship Logi Plugin Service's
-`PluginApi.dll`.
+`PluginApi.dll`. The tested Windows files in `release/1.1.1/` are the same
+GPL-3.0-or-later work.

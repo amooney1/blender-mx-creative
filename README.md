@@ -9,10 +9,11 @@ actually live in Blender instead of being blind shortcuts.
 
 ![The five shipped keypad pages](docs/keypad.png)
 
-macOS is the platform this was tested on: Blender 5.2, Logi Options+ 2.8 and
-Logi Plugin Service 6.4 on Apple silicon. Windows 11 packaging for the same
-plugin actions on the Options+ Actions Ring is in this tree and has not been
-checked on hardware. See [docs/windows-11.md](docs/windows-11.md).
+macOS is the platform the original keypad build was tested on: Blender 5.2,
+Logi Options+ 2.8 and Logi Plugin Service 6.4 on Apple silicon. The Windows 11
+Actions Ring package in [release/1.1.1](release/1.1.1/README.md) was checked
+on one PC. See [docs/windows-11.md](docs/windows-11.md) for what that check
+covered and what it did not.
 
 GPL-3.0-or-later throughout, because it bundles Blender's own UI icons and the
 add-on uses `bpy` — see [NOTICE.md](NOTICE.md).
@@ -52,11 +53,13 @@ outside its own event loop.
 
 ## Install
 
-Windows 11, including the Actions Ring check and rollback, is documented in
+Windows 11 uses the tested files in
+[release/1.1.1](release/1.1.1/README.md), not `dist/Blender-windows-1.1.lplug4`.
+Install, the loopback limit, and rollback are in
 [docs/windows-11.md](docs/windows-11.md). The steps below are the macOS install
 and are unchanged.
 
-Download both files from the [latest release](https://github.com/xfanta/blender-mx-creative/releases/latest):
+Download both macOS files from the [upstream release](https://github.com/xfanta/blender-mx-creative/releases/latest):
 
 * [`Blender.lplug4`](https://github.com/xfanta/blender-mx-creative/releases/latest/download/Blender.lplug4) — the Options+ plugin
 * [`blender_mx_bridge.zip`](https://github.com/xfanta/blender-mx-creative/releases/latest/download/blender_mx_bridge.zip) — the Blender add-on
@@ -191,10 +194,10 @@ On Windows the same project looks for `PluginApi.dll` under
 `C:\Program Files\Logitech\LogiPluginService\`, or in `LOGI_PLUGIN_API_DIR`.
 It does not copy that DLL into the package. `dotnet build` still writes a
 `.link` and reloads Logi Plugin Service. `tools/windows_build.ps1` passes
-`-p:BlenderPluginDevLink=false`, so that package build does neither. The
-assembly target stays `net10.0`. A 1.1.0 Windows build loaded in Logi Plugin
-Service; the Actions Ring hardware check is still open. See
-[docs/windows-11.md](docs/windows-11.md).
+`-p:BlenderPluginDevLink=false`, so that package build does neither. Set
+`PYTHONUTF8=1` and `DOTNET_ROLL_FORWARD=Major` in that PowerShell session
+before the tests or `logiplugintool`. The assembly target stays `net10.0`.
+The PC-checked packages are in [release/1.1.1](release/1.1.1/README.md).
 
 Reload with `open "loupedeck://plugin/Blender/reload"` rather than killing Logi
 Plugin Service. The service drops a marker in `Logs/plugin_crashes/` before loading
