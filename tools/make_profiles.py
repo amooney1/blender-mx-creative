@@ -25,10 +25,16 @@ follow "$<plugin>___<action class>___<parameter>"; run
 
 Writes BlenderPlugin/src/package/profiles/DefaultProfile70.lp5 (MX Creative
 Keypad, 9 keys per page) and DefaultProfile71.lp5 (Dialpad, 4 buttons + 2 dials).
+
+Also writes DefaultProfile72win.lp5, an eight-button Actions Ring template for
+Windows. The macOS keypad and dialpad files are still produced by a full run,
+which assigns them fresh ids. `python3 tools/make_profiles.py --ring` rewrites
+only the ring file, with fixed ids, and leaves 70 and 71 untouched.
 """
 
 import json
 import pathlib
+import sys
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -127,6 +133,25 @@ DIALPAD_DIALS = [
     ("SubsurfLevelAdjustment", None),
 ]
 
+# Eight press slots, the Actions Ring's controlId range 0-7. Adjustments stay
+# in the action picker: scroll-on-a-bubble was not given a default here.
+RING_SLOTS = [
+    ("SelectModeCommand", "vert"),
+    ("SelectModeCommand", "edge"),
+    ("SelectModeCommand", "face"),
+    ("ModeCommand", "toggle_edit"),
+    ("MeshToolCommand", "extrude"),
+    ("MeshToolCommand", "inset"),
+    ("HistoryCommand", "undo"),
+    ("HistoryCommand", "redo"),
+]
+
+# Stable identity so the Windows template does not change on every regeneration.
+RING_PROFILE_ID = "B1E0D072A1114E0A9C0E478000000072"
+RING_PAGE_ID = "B1E0D072A1114E0A9C0E478000000001"
+RING_WORKSPACE_ID = "B1E0D072A1114E0A9C0E478000000002"
+RING_MODIFIED = "2026-11-08T00:00:00Z"
+
 
 def control(index, press=None, rotate=None):
     return {
@@ -137,17 +162,17 @@ def control(index, press=None, rotate=None):
     }
 
 
-def page(display_name, controls):
+def page(display_name, controls, name=None):
     return {
         "$type": f"{NS}.Devices.Loupedeck7Devices.ProfileLayoutPage7, LoupedeckService",
-        "name": guid(),
+        "name": name or guid(),
         "displayName": display_name,
         "description": None,
         "controls": controls,
     }
 
 
-def layout(device, press_pages, rotate_pages):
+def layout(device, press_pages, rotate_pages, workspace_name=None):
     return {
         "$type": f"{NS}.Devices.Loupedeck7Devices.ProfileLayout7, LoupedeckService",
         "deviceType": device,
@@ -162,7 +187,7 @@ def layout(device, press_pages, rotate_pages):
             "dynamicEncoderPages": None,
             "workspaces": [{
                 "$type": f"{NS}.Devices.Loupedeck7Devices.ProfileLayoutWorkspace7, LoupedeckService",
-                "name": guid(),
+                "name": workspace_name or guid(),
                 "displayName": "Workspace 1",
                 "description": None,
                 "pressPages": press_pages,
@@ -174,8 +199,10 @@ def layout(device, press_pages, rotate_pages):
     }
 
 
-def profile(device, display_name, press_pages, rotate_pages):
-    name = guid()
+def profile(device, display_name, press_pages, rotate_pages,
+             name=None, process_or_bundle=None, native_plugins=None,
+             modified=None, workspace_name=None):
+    name = name or guid()
     info = {
         "$type": f"{NS}.ApplicationProfile, LoupedeckService",
         "name": name,
@@ -186,8 +213,8 @@ def profile(device, display_name, press_pages, rotate_pages):
         "applicationName": APPLICATION,
         "nativePluginName": PLUGIN,
         "hasNativePlugin": True,
-        "additionalNativePluginNames": ["DefaultMac"],
-        "lastModifiedTimeUtc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "additionalNativePluginNames": ["DefaultMac"] if native_plugins is None else native_plugins,
+        "lastModifiedTimeUtc": modified or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "profileSettings": {
             "$type": "Loupedeck.DictionaryNoCase`1[[System.String, System.Private.CoreLib]], PluginApi"
         },
@@ -195,7 +222,7 @@ def profile(device, display_name, press_pages, rotate_pages):
         "actionImages60": None,
         "wheelImages": None,
         "actionColors": None,
-        "layout": layout(device, press_pages, rotate_pages),
+        "layout": layout(device, press_pages, rotate_pages, workspace_name),
         "macroCommands": [],
         "macroAdjustments": [],
         "profileCommands": [],
@@ -211,7 +238,7 @@ def profile(device, display_name, press_pages, rotate_pages):
         "deviceType": device,
         "nativePluginName": PLUGIN,
         "hasNativePlugin": True,
-        "processOrBundleName": "org.blenderfoundation.blender",
+        "processOrBundleName": process_or_bundle or "org.blenderfoundation.blender",
         "modes": [{
             "$type": f"{NS}.ApplicationMode, LoupedeckService",
             "name": "Main",
@@ -233,7 +260,54 @@ def write(path, info, application):
     print(f"wrote {path.name}")
 
 
-def main():
+def write_fixed(path, info, application):
+    """Zip with a fixed timestamp so the ring template is reproducible."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    members = {
+        "ApplicationInfo.json": json.dumps(application, indent=2).encode("utf-8"),
+        "ProfileInfo.json": json.dumps(info, indent=2).encode("utf-8"),
+        "ApplicationIcon.png": APPLICATION_ICON.read_bytes(),
+    }
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, payload in members.items():
+            item = zipfile.ZipInfo(name, date_time=(2026, 11, 8, 0, 0, 0))
+            item.compress_type = zipfile.ZIP_DEFLATED
+            item.external_attr = 0o644 << 16
+            zf.writestr(item, payload)
+    print(f"wrote {path.name}")
+
+
+def ring_profile():
+    controls = [
+        control(slot, press=action(cls, param))
+        for slot, (cls, param) in enumerate(RING_SLOTS)
+    ]
+    pages = [page("Actions Ring", controls, name=RING_PAGE_ID)]
+    return profile(
+        "Loupedeck72",
+        "Blender",
+        pages,
+        [],
+        name=RING_PROFILE_ID,
+        process_or_bundle="blender",
+        native_plugins=["DefaultWin"],
+        modified=RING_MODIFIED,
+        workspace_name=RING_WORKSPACE_ID,
+    )
+
+
+def write_actions_ring(path=None):
+    path = pathlib.Path(path) if path else OUT / "DefaultProfile72win.lp5"
+    write_fixed(path, *ring_profile())
+    return path
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv == ["--ring"]:
+        write_actions_ring()
+        return
+
     keypad_pages = [
         page(f"Page ({i + 1}) {title}",
              [control(slot, press=action(cls, param)) for slot, (cls, param) in enumerate(items)])
@@ -248,6 +322,7 @@ def main():
                                 for slot, (cls, param) in enumerate(DIALPAD_DIALS)])]
     write(OUT / "DefaultProfile71.lp5",
           *profile("Loupedeck71", "Blender", buttons, dials))
+    write_actions_ring()
 
 
 if __name__ == "__main__":

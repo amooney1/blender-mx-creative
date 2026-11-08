@@ -35,3 +35,12 @@ application this plugin drives.
 
 This project is not affiliated with, endorsed by, or supported by the Blender
 Foundation or Logitech.
+
+## Fork
+
+The Windows packaging in this repository is a derivative of Michal Fanta's
+[xfanta/blender-mx-creative](https://github.com/xfanta/blender-mx-creative),
+under the same GPL-3.0-or-later terms. The icon attribution above is unchanged.
+Logitech's Marketplace approval guidelines exclude GPL-2.0 and GPL-3.0, so this
+package is not Marketplace-eligible and it does not ship Logi Plugin Service's
+`PluginApi.dll`.

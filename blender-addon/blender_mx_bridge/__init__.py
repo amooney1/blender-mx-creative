@@ -16,7 +16,10 @@
 # MX Console Bridge
 #
 # Listens on a loopback TCP socket and executes Blender commands sent by the
-# Logi Options+ "Blender" plugin running on the MX Creative Console.
+# Logi Options+ "Blender" plugin. The same plugin actions are what Options+
+# shows for the MX Creative Console and, when the plugin is loaded, the
+# Actions Ring. The socket is not a shell and it does not accept arbitrary
+# operators.
 #
 # Protocol: newline-delimited JSON, one request per line, one response per line.
 #   -> {"id": 1, "cmd": "select_mode", "args": {"types": ["VERT"]}}
@@ -36,6 +39,40 @@ import bpy
 HOST = "127.0.0.1"
 DEFAULT_PORT = 47800
 PROTOCOL_VERSION = 1
+MAX_LINE_BYTES = 8192
+
+# Operators the Options+ plugin sends. A local process can connect to this
+# port, so names outside this table are rejected instead of being looked up
+# on bpy.ops. Keep the names aligned with BlenderPlugin/src/Actions.
+_OP_POLICY = {
+    "mesh.select_all": ("EXEC", {"action": frozenset({"SELECT", "DESELECT", "INVERT"})}),
+    "mesh.select_linked": ("EXEC", {}),
+    "mesh.select_more": ("EXEC", {}),
+    "mesh.select_less": ("EXEC", {}),
+    "mesh.extrude_region_move": ("INVOKE", {}),
+    "mesh.inset": ("INVOKE", {}),
+    "mesh.bevel": ("INVOKE", {}),
+    "mesh.loopcut_slide": ("INVOKE", {}),
+    "mesh.knife_tool": ("INVOKE", {}),
+    "mesh.subdivide": ("EXEC", {}),
+    "mesh.merge": ("INVOKE", {}),
+    "mesh.edge_face_add": ("EXEC", {}),
+    "mesh.delete": ("INVOKE", {}),
+    "mesh.duplicate_move": ("INVOKE", {}),
+    "mesh.normals_make_consistent": ("EXEC", {}),
+    "object.shade_smooth": ("EXEC", {}),
+    "object.editmode_toggle": ("EXEC", {}),
+    "object.mode_set": ("EXEC", {"mode": frozenset({"OBJECT", "SCULPT"})}),
+    "transform.resize": ("EXEC", {"value": "flatten-axis"}),
+}
+
+_FLATTEN_VECTORS = (
+    (0.0, 1.0, 1.0),
+    (1.0, 0.0, 1.0),
+    (1.0, 1.0, 0.0),
+)
+
+_SELECT_TYPES = frozenset({"VERT", "EDGE", "FACE"})
 
 # Main-thread work queue. Items are (request_dict, result_holder, done_event).
 _work = queue.Queue()
@@ -131,6 +168,74 @@ def _cmd_state(args):
     return {}
 
 
+def _unit_component(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("scale component is not allowed")
+    number = float(value)
+    if number not in (0.0, 1.0):
+        raise ValueError("scale component is not allowed")
+    return number
+
+
+def _validate_op(args):
+    """Return (name, exec context, props) or raise ValueError."""
+    if not isinstance(args, dict):
+        raise ValueError("op args must be an object")
+    name = args.get("name")
+    policy = _OP_POLICY.get(name)
+    if policy is None:
+        raise ValueError("operator is not allowed")
+    exec_name, prop_rules = policy
+    if args.get("exec", "INVOKE") != exec_name:
+        raise ValueError("operator execution context is not allowed")
+    props = args.get("props") or {}
+    if not isinstance(props, dict):
+        raise ValueError("op props must be an object")
+    if set(props) - set(prop_rules):
+        raise ValueError("operator property is not allowed")
+    if set(prop_rules) - set(props):
+        raise ValueError("operator property is missing")
+    checked = {}
+    for key, rule in prop_rules.items():
+        value = props[key]
+        if rule == "flatten-axis":
+            if not isinstance(value, list) or len(value) != 3:
+                raise ValueError("scale value is not allowed")
+            vector = tuple(_unit_component(part) for part in value)
+            if vector not in _FLATTEN_VECTORS:
+                raise ValueError("scale value is not allowed")
+            checked[key] = [vector[0], vector[1], vector[2]]
+        elif value not in rule:
+            raise ValueError("operator property value is not allowed")
+        else:
+            checked[key] = value
+    return name, exec_name, checked
+
+
+def _validate_select_types(types):
+    if not isinstance(types, list) or not 1 <= len(types) <= 3:
+        raise ValueError("select_mode types must be 1 to 3 of VERT, EDGE, FACE")
+    if any(item not in _SELECT_TYPES for item in types):
+        raise ValueError("select_mode type is not allowed")
+    return types
+
+
+def _consume_line(buffer):
+    """Split one request off a TCP buffer.
+
+    Returns ("line", line, rest), ("wait", b"", buffer) or
+    ("overflow", b"", rest). A line longer than MAX_LINE_BYTES is refused.
+    """
+    if b"\n" in buffer:
+        line, _, rest = buffer.partition(b"\n")
+        if len(line) > MAX_LINE_BYTES:
+            return "overflow", b"", rest
+        return "line", line, rest
+    if len(buffer) > MAX_LINE_BYTES:
+        return "overflow", b"", b""
+    return "wait", b"", buffer
+
+
 def _cmd_select_mode(args):
     """Set the mesh select mode. types is any of VERT / EDGE / FACE.
 
@@ -139,7 +244,7 @@ def _cmd_select_mode(args):
     but it skips the selection flush between modes and leaves the viewport
     showing the old one - which looks exactly like the button doing nothing.
     """
-    types = args.get("types") or ["VERT"]
+    types = _validate_select_types(args.get("types") or ["VERT"])
     obj = _active_object()
 
     if obj is not None and obj.mode == 'EDIT':
@@ -160,7 +265,7 @@ def _cmd_select_mode(args):
 
 
 def _cmd_op(args):
-    """Run an arbitrary operator.
+    """Run one allowlisted Blender operator.
 
     args: {"name": "mesh.extrude_region_move", "exec": "INVOKE"|"EXEC",
            "props": {...}}
@@ -168,14 +273,11 @@ def _cmd_op(args):
     Note that ed.undo / ed.redo cannot be driven from here - Blender rejects
     them outside its own event loop - so the plugin sends those as keystrokes.
     """
-    name = args.get("name")
-    if not name:
-        raise ValueError("op requires 'name'")
+    name, exec_name, props = _validate_op(args)
     module, _, func = name.partition(".")
     op = getattr(getattr(bpy.ops, module), func)
 
-    exec_ctx = 'INVOKE_DEFAULT' if args.get("exec", "INVOKE") == "INVOKE" else 'EXEC_DEFAULT'
-    props = args.get("props") or {}
+    exec_ctx = 'INVOKE_DEFAULT' if exec_name == "INVOKE" else 'EXEC_DEFAULT'
 
     window, area, region, _ = _find_view3d()
     if area is None:
@@ -415,8 +517,16 @@ class _BridgeServer:
                 if not chunk:
                     break
                 buffer += chunk
-                while b"\n" in buffer:
-                    line, _, buffer = buffer.partition(b"\n")
+                while True:
+                    kind, line, buffer = _consume_line(buffer)
+                    if kind == "wait":
+                        break
+                    if kind == "overflow":
+                        try:
+                            conn.sendall(b'{"ok": false, "error": "request too large"}\n')
+                        except OSError:
+                            return
+                        return
                     line = line.strip()
                     if not line:
                         continue
@@ -425,8 +535,11 @@ class _BridgeServer:
                     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                         response = {"ok": False, "error": "bad request: %s" % exc}
                     else:
-                        response = _dispatch(request)
-                        response["id"] = request.get("id")
+                        if not isinstance(request, dict):
+                            response = {"ok": False, "error": "bad request"}
+                        else:
+                            response = _dispatch(request)
+                            response["id"] = request.get("id")
                     try:
                         conn.sendall((json.dumps(response) + "\n").encode("utf-8"))
                     except OSError:

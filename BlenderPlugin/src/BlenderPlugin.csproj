@@ -9,6 +9,10 @@
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>4</WarningLevel>
 
+    <Version>1.1.0</Version>
+    <AssemblyVersion>1.1.0.0</AssemblyVersion>
+    <FileVersion>1.1.0.0</FileVersion>
+
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
 
     <!-- The Plugin Service supplies PluginApi and everything it drags in, exactly
@@ -16,11 +20,18 @@
          put a second PluginApi in the package and break type identity. -->
     <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
 
-    <PluginApiDir Condition="$(OS) == 'Windows_NT'">C:\Program Files\Logi\LogiPluginService\</PluginApiDir>
-    <PluginApiDir Condition="$(OS) != 'Windows_NT'">/Applications/Utilities/LogiPluginService.app/Contents/MonoBundle/</PluginApiDir>
+    <!-- LOGI_PLUGIN_API_DIR is the directory that contains PluginApi.dll.
+         The host supplies that DLL. It is referenced with Private=false below
+         and must not be copied into the package. -->
+    <PluginApiDir Condition="'$(LOGI_PLUGIN_API_DIR)' != ''">$(LOGI_PLUGIN_API_DIR)</PluginApiDir>
+    <PluginApiDir Condition="'$(PluginApiDir)' == '' and $(OS) == 'Windows_NT' and Exists('C:\Program Files\Logi\LogiPluginService\PluginApi.dll')">C:\Program Files\Logi\LogiPluginService\</PluginApiDir>
+    <PluginApiDir Condition="'$(PluginApiDir)' == '' and $(OS) == 'Windows_NT' and Exists('C:\Program Files\Logitech\LogiPluginService\PluginApi.dll')">C:\Program Files\Logitech\LogiPluginService\</PluginApiDir>
+    <PluginApiDir Condition="'$(PluginApiDir)' == '' and $(OS) == 'Windows_NT'">C:\Program Files\Logi\LogiPluginService\</PluginApiDir>
+    <PluginApiDir Condition="'$(PluginApiDir)' == ''">/Applications/Utilities/LogiPluginService.app/Contents/MonoBundle/</PluginApiDir>
 
-    <PluginDir Condition="$(OS) == 'Windows_NT'">$(LocalAppData)\Logi\LogiPluginService\Plugins\</PluginDir>
-    <PluginDir Condition="$(OS) != 'Windows_NT'">~/Library/Application\ Support/Logi/LogiPluginService/Plugins/</PluginDir>
+    <PluginDir Condition="'$(LOGI_PLUGIN_DIR)' != ''">$(LOGI_PLUGIN_DIR)</PluginDir>
+    <PluginDir Condition="'$(PluginDir)' == '' and $(OS) == 'Windows_NT'">$(LocalAppData)\Logi\LogiPluginService\Plugins\</PluginDir>
+    <PluginDir Condition="'$(PluginDir)' == ''">~/Library/Application\ Support/Logi/LogiPluginService/Plugins/</PluginDir>
 
     <BaseOutputPath>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\bin\'))</BaseOutputPath>
     <OutputPath>$(BaseOutputPath)$(Configuration)\bin\</OutputPath>
@@ -30,7 +41,7 @@
 
   <ItemGroup>
     <Reference Include="PluginApi">
-      <HintPath>$(PluginApiDir)PluginApi.dll</HintPath>
+      <HintPath>$([System.IO.Path]::Combine('$(PluginApiDir)', 'PluginApi.dll'))</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>
@@ -50,7 +61,8 @@
   </Target>
 
   <Target Name="PostBuild" AfterTargets="PostBuildEvent">
-    <Exec Condition="$(OS) == 'Windows_NT'" Command="echo $(BaseOutputPath)$(Configuration)\ &gt; &quot;$(PluginDir)$(ProjectName).link&quot;" />
+    <Exec Condition="$(OS) == 'Windows_NT' and Exists('$(PluginDir)')" Command="echo $(BaseOutputPath)$(Configuration)\ &gt; &quot;$(PluginDir)$(ProjectName).link&quot;" />
+    <Warning Condition="$(OS) == 'Windows_NT' and !Exists('$(PluginDir)')" Text="Logi Plugin Service plugins directory was not found at $(PluginDir). The assembly was built without a .link file. Set LOGI_PLUGIN_DIR to that directory, or install Logi Options+ and rebuild, before a live load." />
     <Exec Condition="$(OS) != 'Windows_NT'" Command="echo $(BaseOutputPath)$(Configuration)\ &gt; $(PluginDir)$(ProjectName).link" />
     <Message Text="🔨 Created plugin link at: $(PluginDir)$(ProjectName).link" Importance="High" />
 

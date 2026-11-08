@@ -9,8 +9,10 @@ actually live in Blender instead of being blind shortcuts.
 
 ![The five shipped keypad pages](docs/keypad.png)
 
-macOS only for now. Tested with Blender 5.2, Logi Options+ 2.8 and Logi Plugin
-Service 6.4 on Apple silicon.
+macOS is the platform this was tested on: Blender 5.2, Logi Options+ 2.8 and
+Logi Plugin Service 6.4 on Apple silicon. Windows 11 packaging for the same
+plugin actions on the Options+ Actions Ring is in this tree and has not been
+checked on hardware. See [docs/windows-11.md](docs/windows-11.md).
 
 GPL-3.0-or-later throughout, because it bundles Blender's own UI icons and the
 add-on uses `bpy` — see [NOTICE.md](NOTICE.md).
@@ -49,6 +51,10 @@ Undo and redo are keystroke-only on purpose: Blender refuses to run `ed.undo` fr
 outside its own event loop.
 
 ## Install
+
+Windows 11, including the Actions Ring check and rollback, is documented in
+[docs/windows-11.md](docs/windows-11.md). The steps below are the macOS install
+and are unchanged.
 
 Download both files from the [latest release](https://github.com/xfanta/blender-mx-creative/releases/latest):
 
@@ -136,7 +142,11 @@ regenerate to make it yours.
 
 ![The Custom page](docs/custom-page.png)
 
-There is no default profile for the Actions Ring.
+There is no default Actions Ring profile for macOS, and the keypad and dialpad
+profiles are unchanged. A Windows package adds `profiles/DefaultProfile72win.lp5`,
+an eight-button template. Logi Plugin Service has not been observed applying it.
+The actions themselves are the Installed Plugins actions, which the Actions SDK
+tells you to look for under Actions Ring as well as the consoles.
 
 Icons are Blender's own UI icons, recoloured and rendered per button. The six tool
 icons Blender ships only in its internal `VCO` format — extrude, inset, subdivide,
@@ -175,6 +185,14 @@ and every build recreates it — including `-c Release` — so delete it before 
 a real `.lplug4` install. The log line `loaded from …` says which one is live.
 
 For a tight loop: `cd BlenderPlugin/src && dotnet watch build`.
+
+On Windows the same project looks for `PluginApi.dll` under
+`C:\Program Files\Logi\LogiPluginService\` and
+`C:\Program Files\Logitech\LogiPluginService\`, or in `LOGI_PLUGIN_API_DIR`.
+It does not copy that DLL into the package. `tools/windows_build.ps1` builds
+and packs only; it does not install. The assembly target stays `net10.0`,
+which is what Logi Plugin Service 6.4 loaded on the Mac this was built for.
+A rebuild has not been run on Windows in this change.
 
 Reload with `open "loupedeck://plugin/Blender/reload"` rather than killing Logi
 Plugin Service. The service drops a marker in `Logs/plugin_crashes/` before loading
