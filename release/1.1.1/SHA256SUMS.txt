@@ -1,0 +1,2 @@
+d02375b5ac2ee63a5a5d86843e7175681d15fdf0dc6875a1f5550dad98b5433d  Blender-windows-1.1.1.lplug4
+62fb7bfaff1586b6e4bee91814619efe6a95904b9f3cb3ac1779cfe52e58d658  blender_mx_bridge-1.1.1.zip

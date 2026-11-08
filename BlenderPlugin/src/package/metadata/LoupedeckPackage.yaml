@@ -7,13 +7,14 @@ type: plugin4
 name: Blender
 displayName: Blender
 description: >-
-  Mesh editing controls for Blender - select mode, modelling tools, snapping and
-  pivot - with live state on the keys. Talks to the "MX Console Bridge" add-on
-  when it is running and falls back to keyboard shortcuts when it is not.
+  Mesh editing controls for Blender on the MX Creative Console and the Options+
+  Actions Ring. Live state when the MX Console Bridge add-on is running, and
+  keyboard shortcuts when it is not. GPL-3.0-or-later fork of
+  xfanta/blender-mx-creative. Not a Logitech Marketplace package.
 
 pluginFileName: BlenderPlugin.dll
 
-version: 1.0
+version: 1.1.1
 author: michalfanta
 copyright: Copyright © 2026 michalfanta. All rights reserved.
 
@@ -22,10 +23,18 @@ copyright: Copyright © 2026 michalfanta. All rights reserved.
 # PLUGIN PROPERTIES
 # ==================================================================================================
 
+# The same net10.0 IL assembly is loaded on both platforms. PluginApi.dll is
+# provided by Logi Plugin Service and is not part of this package.
+pluginFolderWin: bin
 pluginFolderMac: bin
 
-# Loupedeck70 / 71 / 72 - MX Creative Keypad, MX Creative Dialpad and the Actions Ring.
+# LoupedeckExtendedFamily is the device-family value in the official Actions SDK
+# demo and the PluginApi DeviceType name whose display name is "Logitech Creative
+# Family" (Loupedeck70 keypad, Loupedeck71 dialpad, Loupedeck72 Actions Ring).
+# LogitechCreativeFamily is the token this package already shipped for macOS.
+# It stays so a published value is not deleted. There is no MX Master 4 device id.
 supportedDevices:
+    - LoupedeckExtendedFamily
     - LogitechCreativeFamily
 
 pluginCapabilities:
@@ -39,6 +48,8 @@ applicationPatterns:
     processNamePattern: ^blender$
     bundleNamePattern: ^org\.blenderfoundation\.blender$
     displayNamePattern: ^Blender$
+    # Windows executable path. ClientApplication.GetProcessName() is still "blender".
+    executablePathPattern: (?i)blender\.exe$
 
 minimumLoupedeckVersion: 6.0
 
@@ -50,5 +61,6 @@ minimumLoupedeckVersion: 6.0
 # GPL, because the package bundles Blender's own UI icons. See NOTICE.md.
 license: GPL-3.0-or-later
 licenseUrl: https://www.gnu.org/licenses/gpl-3.0.html
-homePageUrl: https://github.com/xfanta/blender-mx-creative
-supportPageUrl: https://github.com/xfanta/blender-mx-creative/issues
+# Upstream project: https://github.com/xfanta/blender-mx-creative
+homePageUrl: https://github.com/amooney1/blender-mx-creative
+supportPageUrl: https://github.com/amooney1/blender-mx-creative/issues

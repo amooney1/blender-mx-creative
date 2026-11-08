@@ -16,7 +16,10 @@
 # MX Console Bridge
 #
 # Listens on a loopback TCP socket and executes Blender commands sent by the
-# Logi Options+ "Blender" plugin running on the MX Creative Console.
+# Logi Options+ "Blender" plugin. The same plugin actions are what Options+
+# shows for the MX Creative Console and, when the plugin is loaded, the
+# Actions Ring. The socket is not a shell and it does not accept arbitrary
+# operators.
 #
 # Protocol: newline-delimited JSON, one request per line, one response per line.
 #   -> {"id": 1, "cmd": "select_mode", "args": {"types": ["VERT"]}}
@@ -25,17 +28,124 @@
 # Everything that touches bpy runs on Blender's main thread via a timer; the
 # socket threads only queue work and wait for the result.
 
+import hmac
 import json
 import queue
 import socket
 import threading
-import traceback
 
 import bpy
 
 HOST = "127.0.0.1"
 DEFAULT_PORT = 47800
 PROTOCOL_VERSION = 1
+MAX_LINE_BYTES = 8192
+
+# Operators the Options+ plugin sends. A local process can connect to this
+# port, so names outside this table are rejected instead of being looked up
+# on bpy.ops. Keep the names aligned with BlenderPlugin/src/Actions.
+_OP_POLICY = {
+    "mesh.select_all": ("EXEC", {"action": frozenset({"SELECT", "DESELECT", "INVERT"})}),
+    "mesh.select_linked": ("EXEC", {}),
+    "mesh.select_more": ("EXEC", {}),
+    "mesh.select_less": ("EXEC", {}),
+    "mesh.extrude_region_move": ("INVOKE", {}),
+    "mesh.inset": ("INVOKE", {}),
+    "mesh.bevel": ("INVOKE", {}),
+    "mesh.loopcut_slide": ("INVOKE", {}),
+    "mesh.knife_tool": ("INVOKE", {}),
+    "mesh.subdivide": ("EXEC", {}),
+    "mesh.merge": ("INVOKE", {}),
+    "mesh.edge_face_add": ("EXEC", {}),
+    "mesh.delete": ("INVOKE", {}),
+    "mesh.duplicate_move": ("INVOKE", {}),
+    "mesh.normals_make_consistent": ("EXEC", {}),
+    "object.shade_smooth": ("EXEC", {}),
+    "object.editmode_toggle": ("EXEC", {}),
+    "object.mode_set": ("EXEC", {"mode": frozenset({"OBJECT", "SCULPT"})}),
+    "transform.resize": ("EXEC", {"value": "flatten-axis"}),
+}
+
+_FLATTEN_VECTORS = (
+    (0.0, 1.0, 1.0),
+    (1.0, 0.0, 1.0),
+    (1.0, 1.0, 0.0),
+)
+
+_SELECT_TYPES = frozenset({"VERT", "EDGE", "FACE"})
+
+# Wire errors are codes plus a fixed phrase. Exception text and tracebacks
+# stay off the socket: they can contain the user's paths.
+_CLIENT_ERRORS = {
+    "bad_request": "bad request",
+    "request_too_large": "request too large",
+    "unknown_command": "unknown command",
+    "rejected": "command rejected",
+    "failed": "command failed",
+    "timeout": "timed out",
+    "no_response": "no response",
+    "unauthorized": "unauthorized",
+}
+
+
+def _client_error(code):
+    if code not in _CLIENT_ERRORS:
+        code = "failed"
+    return {"ok": False, "error": code, "message": _CLIENT_ERRORS[code]}
+
+
+def _failure_response(exc):
+    """Map a main-thread exception to a client-safe refusal.
+
+    ValueError is the allowlist and argument check. Everything else, including
+    Blender's own errors, is a generic failure. The exception text is not copied.
+    """
+    code = "rejected" if isinstance(exc, ValueError) else "failed"
+    print("[MX Bridge] %s (%s)" % (code, type(exc).__name__))
+    return _client_error(code)
+
+
+def _configured_token():
+    """Return the pairing token, or "" when pairing is off.
+
+    An over-long value fails closed (None) so a bad preference does not turn
+    pairing off. The shipped default is empty, which accepts the existing plugin.
+    """
+    preferences = getattr(bpy.context, "preferences", None)
+    addons = getattr(preferences, "addons", None)
+    if addons is None:
+        return ""
+    prefs = addons.get(__package__)
+    if not prefs:
+        return ""
+    token = getattr(prefs.preferences, "token", "") or ""
+    if not isinstance(token, str):
+        return None
+    token = token.strip()
+    if token == "":
+        return ""
+    if len(token) > 256 or "\n" in token or "\r" in token or "\x00" in token:
+        return None
+    return token
+
+
+def _check_auth(request, expected):
+    """True when pairing is off, or the request carries the same token.
+
+    expected "" keeps the current Mac and Windows installs working. expected
+    None means the preference is unusable and the request is refused.
+    """
+    if expected is None:
+        return False
+    if expected == "":
+        return True
+    presented = request.get("auth") if isinstance(request, dict) else None
+    if not isinstance(presented, str) or len(presented) > 256:
+        return False
+    try:
+        return hmac.compare_digest(presented.encode("utf-8"), expected.encode("utf-8"))
+    except (TypeError, UnicodeError):
+        return False
 
 # Main-thread work queue. Items are (request_dict, result_holder, done_event).
 _work = queue.Queue()
@@ -131,6 +241,74 @@ def _cmd_state(args):
     return {}
 
 
+def _unit_component(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("scale component is not allowed")
+    number = float(value)
+    if number not in (0.0, 1.0):
+        raise ValueError("scale component is not allowed")
+    return number
+
+
+def _validate_op(args):
+    """Return (name, exec context, props) or raise ValueError."""
+    if not isinstance(args, dict):
+        raise ValueError("op args must be an object")
+    name = args.get("name")
+    policy = _OP_POLICY.get(name)
+    if policy is None:
+        raise ValueError("operator is not allowed")
+    exec_name, prop_rules = policy
+    if args.get("exec", "INVOKE") != exec_name:
+        raise ValueError("operator execution context is not allowed")
+    props = args.get("props") or {}
+    if not isinstance(props, dict):
+        raise ValueError("op props must be an object")
+    if set(props) - set(prop_rules):
+        raise ValueError("operator property is not allowed")
+    if set(prop_rules) - set(props):
+        raise ValueError("operator property is missing")
+    checked = {}
+    for key, rule in prop_rules.items():
+        value = props[key]
+        if rule == "flatten-axis":
+            if not isinstance(value, list) or len(value) != 3:
+                raise ValueError("scale value is not allowed")
+            vector = tuple(_unit_component(part) for part in value)
+            if vector not in _FLATTEN_VECTORS:
+                raise ValueError("scale value is not allowed")
+            checked[key] = [vector[0], vector[1], vector[2]]
+        elif value not in rule:
+            raise ValueError("operator property value is not allowed")
+        else:
+            checked[key] = value
+    return name, exec_name, checked
+
+
+def _validate_select_types(types):
+    if not isinstance(types, list) or not 1 <= len(types) <= 3:
+        raise ValueError("select_mode types must be 1 to 3 of VERT, EDGE, FACE")
+    if any(item not in _SELECT_TYPES for item in types):
+        raise ValueError("select_mode type is not allowed")
+    return types
+
+
+def _consume_line(buffer):
+    """Split one request off a TCP buffer.
+
+    Returns ("line", line, rest), ("wait", b"", buffer) or
+    ("overflow", b"", rest). A line longer than MAX_LINE_BYTES is refused.
+    """
+    if b"\n" in buffer:
+        line, _, rest = buffer.partition(b"\n")
+        if len(line) > MAX_LINE_BYTES:
+            return "overflow", b"", rest
+        return "line", line, rest
+    if len(buffer) > MAX_LINE_BYTES:
+        return "overflow", b"", b""
+    return "wait", b"", buffer
+
+
 def _cmd_select_mode(args):
     """Set the mesh select mode. types is any of VERT / EDGE / FACE.
 
@@ -139,7 +317,7 @@ def _cmd_select_mode(args):
     but it skips the selection flush between modes and leaves the viewport
     showing the old one - which looks exactly like the button doing nothing.
     """
-    types = args.get("types") or ["VERT"]
+    types = _validate_select_types(args.get("types") or ["VERT"])
     obj = _active_object()
 
     if obj is not None and obj.mode == 'EDIT':
@@ -160,7 +338,7 @@ def _cmd_select_mode(args):
 
 
 def _cmd_op(args):
-    """Run an arbitrary operator.
+    """Run one allowlisted Blender operator.
 
     args: {"name": "mesh.extrude_region_move", "exec": "INVOKE"|"EXEC",
            "props": {...}}
@@ -168,14 +346,11 @@ def _cmd_op(args):
     Note that ed.undo / ed.redo cannot be driven from here - Blender rejects
     them outside its own event loop - so the plugin sends those as keystrokes.
     """
-    name = args.get("name")
-    if not name:
-        raise ValueError("op requires 'name'")
+    name, exec_name, props = _validate_op(args)
     module, _, func = name.partition(".")
     op = getattr(getattr(bpy.ops, module), func)
 
-    exec_ctx = 'INVOKE_DEFAULT' if args.get("exec", "INVOKE") == "INVOKE" else 'EXEC_DEFAULT'
-    props = args.get("props") or {}
+    exec_ctx = 'INVOKE_DEFAULT' if exec_name == "INVOKE" else 'EXEC_DEFAULT'
 
     window, area, region, _ = _find_view3d()
     if area is None:
@@ -314,10 +489,14 @@ def _tag_redraw():
 
 
 def _handle(request):
+    if not isinstance(request, dict):
+        return _client_error("bad_request")
+    if not _check_auth(request, _configured_token()):
+        return _client_error("unauthorized")
     cmd = request.get("cmd")
     handler = _HANDLERS.get(cmd)
     if handler is None:
-        return {"ok": False, "error": "unknown command: %s" % cmd}
+        return _client_error("unknown_command")
     payload = handler(request.get("args") or {}) or {}
     _tag_redraw()
     response = {"ok": True}
@@ -338,12 +517,8 @@ def _pump():
             break
         try:
             holder["response"] = _handle(request)
-        except Exception as exc:  # noqa: BLE001 - report anything back to the console
-            holder["response"] = {
-                "ok": False,
-                "error": "%s: %s" % (type(exc).__name__, exc),
-                "trace": traceback.format_exc(),
-            }
+        except Exception as exc:  # noqa: BLE001 - the client gets a code, not the text
+            holder["response"] = _failure_response(exc)
         finally:
             done.set()
     return 0.02
@@ -355,8 +530,8 @@ def _dispatch(request, timeout=5.0):
     done = threading.Event()
     _work.put((request, holder, done))
     if not done.wait(timeout):
-        return {"ok": False, "error": "timed out waiting for Blender's main thread"}
-    return holder.get("response", {"ok": False, "error": "no response"})
+        return _client_error("timeout")
+    return holder.get("response", _client_error("no_response"))
 
 
 # ---------------------------------------------------------------------------
@@ -415,18 +590,30 @@ class _BridgeServer:
                 if not chunk:
                     break
                 buffer += chunk
-                while b"\n" in buffer:
-                    line, _, buffer = buffer.partition(b"\n")
+                while True:
+                    kind, line, buffer = _consume_line(buffer)
+                    if kind == "wait":
+                        break
+                    if kind == "overflow":
+                        try:
+                            payload = json.dumps(_client_error("request_too_large")) + "\n"
+                            conn.sendall(payload.encode("utf-8"))
+                        except OSError:
+                            return
+                        return
                     line = line.strip()
                     if not line:
                         continue
                     try:
                         request = json.loads(line.decode("utf-8"))
-                    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                        response = {"ok": False, "error": "bad request: %s" % exc}
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        response = _client_error("bad_request")
                     else:
-                        response = _dispatch(request)
-                        response["id"] = request.get("id")
+                        if not isinstance(request, dict):
+                            response = _client_error("bad_request")
+                        else:
+                            response = _dispatch(request)
+                            response["id"] = request.get("id")
                     try:
                         conn.sendall((json.dumps(response) + "\n").encode("utf-8"))
                     except OSError:
@@ -448,9 +635,27 @@ class MXBridgePreferences(bpy.types.AddonPreferences):
         max=65535,
     )
 
+    token: bpy.props.StringProperty(
+        name="Bridge token",
+        description=(
+            "Leave empty to accept the existing local plugin. Set this only "
+            "after the plugin token file uses the same value. That migration "
+            "is off until it is explicitly approved"
+        ),
+        default="",
+        maxlen=256,
+        subtype='PASSWORD',
+    )
+
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "port")
+        layout.prop(self, "token")
+        token = (self.token or "").strip()
+        if token:
+            layout.label(text="Token on. Requests without it are refused.")
+        else:
+            layout.label(text="Token off. The existing local plugin is accepted.")
         running = _server is not None
         layout.label(
             text="Listening on %s:%d" % (HOST, self.port) if running else "Not running",

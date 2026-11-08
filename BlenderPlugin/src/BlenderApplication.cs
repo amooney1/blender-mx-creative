@@ -26,13 +26,28 @@ namespace Loupedeck.BlenderPlugin
         private const String MacBundleName = "org.blenderfoundation.blender";
         private const String MacApplicationPath = "/Applications/Blender.app";
 
+        // Windows process name of blender.exe, without the extension. The same
+        // name is what the bridge already used on macOS. Options+ uses this,
+        // not a mouse-model id, to decide that Blender is the foreground app.
         protected override String GetProcessName() => "blender";
 
         protected override String GetBundleName() => MacBundleName;
 
-        public override ClientApplicationStatus GetApplicationStatus() =>
-            Directory.Exists(MacApplicationPath)
-                ? ClientApplicationStatus.Installed
-                : ClientApplicationStatus.Unknown;
+        public override ClientApplicationStatus GetApplicationStatus()
+        {
+            // macOS behavior is unchanged: Installed only when Blender.app is
+            // in /Applications, otherwise Unknown.
+            if (Directory.Exists(MacApplicationPath))
+            {
+                return ClientApplicationStatus.Installed;
+            }
+
+            if (BlenderInstallProbe.IsWindowsInstallPresent())
+            {
+                return ClientApplicationStatus.Installed;
+            }
+
+            return ClientApplicationStatus.Unknown;
+        }
     }
 }
